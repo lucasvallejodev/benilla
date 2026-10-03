@@ -122,3 +122,48 @@ fn every_fired_event_reaches_the_listeners() {
         );
     }
 }
+
+/// Every art file the Lua names (`ART .. "Name"`) is shipped, so no button draws blank.
+#[test]
+fn every_art_reference_is_shipped() {
+    let mut checked = 0;
+    for file in ADDON.files() {
+        let name = file.path().to_string_lossy().to_string();
+        if !name.ends_with(".lua") {
+            continue;
+        }
+        let text = std::str::from_utf8(file.contents()).expect("utf-8");
+        for (at, _) in text.match_indices("ART .. \"") {
+            let rest = &text[at + "ART .. \"".len()..];
+            let art = &rest[..rest.find('"').expect("a closing quote")];
+            assert!(
+                ADDON.get_file(format!("Art/{art}.tga")).is_some(),
+                "{name} names Art/{art}.tga, which is not shipped"
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 30, "only {checked} art references found");
+    // The bot wheel's table names its art without the prefix.
+    let wheel = source("Wheel.lua");
+    let table = &wheel[wheel.find("local BOT_ICONS = {").expect("the table")..];
+    let table = &table[..table.find('}').expect("its end")];
+    for (at, _) in table.match_indices("= \"") {
+        let rest = &table[at + 3..];
+        let art = &rest[..rest.find('"').expect("a closing quote")];
+        assert!(
+            ADDON.get_file(format!("Art/{art}.tga")).is_some(),
+            "the bot wheel names Art/{art}.tga, which is not shipped"
+        );
+    }
+}
+
+/// The boot VM of the login and character screens has no stock UI, which is how the pad tells
+/// those screens from the world.
+#[test]
+fn a_bare_vm_reads_as_before_the_world() {
+    let script = UiScript::new().expect("a bare VM");
+    assert!(!script
+        .eval::<bool>("return UIParent ~= nil")
+        .expect("the check answers"));
+}

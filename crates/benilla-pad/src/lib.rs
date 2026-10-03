@@ -13,11 +13,17 @@
 //! `BENILLAPAD_LAYER(layer)`, `BENILLAPAD_BUTTON(button, down)`, and outside the world mode
 //! `BENILLAPAD_NAV(button, down)` and `BENILLAPAD_STICK(lx, ly, rx, ry)`. Without the addon the
 //! pad still plays on the stock commands ([`map::fallback_command`]).
+//!
+//! Before the world (login, realm list, character select) the stock UI and the addon are not
+//! loaded: the pad presses the keys those screens read and drives the mouse cursor
+//! ([`drive_glue`]).
 
 pub mod addon;
 pub mod map;
 
+use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
+use bevy::input::ButtonState;
 use bevy::input::InputSystems;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -234,12 +240,34 @@ fn drive_pad(
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     mut mouse: ResMut<ButtonInput<MouseButton>>,
     mut scroll: ResMut<AccumulatedMouseScroll>,
+    mut keys: ResMut<ButtonInput<KeyCode>>,
+    mut key_events: MessageWriter<KeyboardInput>,
+    mut glue: Local<Vec<(GamepadButton, GlueInput)>>,
 ) {
-    // No in-world VM (glue screens, loading): nothing to drive and nothing of ours survives.
-    let Some(mut script) = script else {
+    // Before the world (login, realm list, character select) the VM is the boot one, with no
+    // stock UI loaded (`UIParent` is FrameXML's): nothing of the world's survives, and the pad
+    // drives those screens' own keys and the cursor.
+    let in_world = script
+        .as_ref()
+        .is_some_and(|s| s.eval::<bool>("return UIParent ~= nil").unwrap_or(false));
+    let Some(mut script) = script.filter(|_| in_world) else {
         *state = PadState::default();
+        drive_glue(
+            pads.iter().next().map(|(_, g)| g),
+            &settings,
+            &time,
+            windows.single_mut().ok().as_deref_mut(),
+            &mut mouse,
+            &mut keys,
+            &mut key_events,
+            &mut glue,
+        );
         return;
     };
+    // Entering the world with a glue key still held: let go of it.
+    for (_, input) in glue.drain(..) {
+        release_glue(input, &mut mouse, &mut keys, &mut key_events);
+    }
     let session = script.session();
     if state.session != Some(session) {
         *state = PadState {
@@ -445,15 +473,7 @@ fn drive_pad(
     if cursor {
         set_look(&script, &mut state, false);
         if let (Some(w), true) = (window.as_deref_mut(), right_live) {
-            let speed =
-                settings.cursor_speed * deflection(right.length(), settings.deadzone).powf(1.5);
-            let at = w
-                .cursor_position()
-                .unwrap_or(Vec2::new(w.width() / 2.0, w.height() / 2.0));
-            // Window y runs down; stick y runs up.
-            let to = at + Vec2::new(right.x, -right.y).normalize() * speed * time.delta_secs();
-            let to = to.clamp(Vec2::ZERO, Vec2::new(w.width() - 1.0, w.height() - 1.0));
-            w.set_cursor_position(Some(to));
+            move_cursor(w, right, &settings, &time);
         }
         return;
     }
@@ -489,6 +509,124 @@ fn drive_pad(
         let y = if settings.invert_y { dir.y } else { -dir.y };
         motion.delta += Vec2::new(dir.x, y) * units;
     }
+}
+
+/// What a pad button holds down before the world.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GlueInput {
+    Key(KeyCode),
+    Mouse(MouseButton),
+}
+
+/// The pad before the world: A is Enter (log in, enter the world, a dialog's Okay), B is Escape
+/// (back, Cancel), the D-pad is the arrow keys (the character and realm lists), Y is Tab (the
+/// next box), X clicks, and the right stick moves the cursor. These are the keys the screens
+/// read (`login`, `realm_select`, `char_select`).
+fn glue_input(button: GamepadButton) -> Option<GlueInput> {
+    Some(match button {
+        GamepadButton::South => GlueInput::Key(KeyCode::Enter),
+        GamepadButton::East => GlueInput::Key(KeyCode::Escape),
+        GamepadButton::DPadUp => GlueInput::Key(KeyCode::ArrowUp),
+        GamepadButton::DPadDown => GlueInput::Key(KeyCode::ArrowDown),
+        GamepadButton::DPadLeft => GlueInput::Key(KeyCode::ArrowLeft),
+        GamepadButton::DPadRight => GlueInput::Key(KeyCode::ArrowRight),
+        GamepadButton::North => GlueInput::Key(KeyCode::Tab),
+        GamepadButton::West => GlueInput::Mouse(MouseButton::Left),
+        _ => return None,
+    })
+}
+
+/// A key edge as the keyboard would send it: the button plane for `just_pressed` readers and the
+/// message for the ones that read events (Tab on the login screen).
+fn glue_key(
+    key: KeyCode,
+    down: bool,
+    keys: &mut ButtonInput<KeyCode>,
+    events: &mut MessageWriter<KeyboardInput>,
+) {
+    if down {
+        keys.press(key);
+    } else {
+        keys.release(key);
+    }
+    events.write(KeyboardInput {
+        key_code: key,
+        logical_key: Key::Unidentified(bevy::input::keyboard::NativeKey::Unidentified),
+        state: if down {
+            ButtonState::Pressed
+        } else {
+            ButtonState::Released
+        },
+        text: None,
+        repeat: false,
+        window: Entity::PLACEHOLDER,
+    });
+}
+
+fn release_glue(
+    input: GlueInput,
+    mouse: &mut ButtonInput<MouseButton>,
+    keys: &mut ButtonInput<KeyCode>,
+    events: &mut MessageWriter<KeyboardInput>,
+) {
+    match input {
+        GlueInput::Key(k) => glue_key(k, false, keys, events),
+        GlueInput::Mouse(b) => mouse.release(b),
+    }
+}
+
+/// The pad on the screens before the world ([`glue_input`]).
+fn drive_glue(
+    pad: Option<&Gamepad>,
+    settings: &PadSettings,
+    time: &Time,
+    window: Option<&mut Window>,
+    mouse: &mut ButtonInput<MouseButton>,
+    keys: &mut ButtonInput<KeyCode>,
+    events: &mut MessageWriter<KeyboardInput>,
+    held: &mut Vec<(GamepadButton, GlueInput)>,
+) {
+    let mut i = 0;
+    while i < held.len() {
+        let (button, input) = held[i];
+        if pad.is_none_or(|p| !p.pressed(button)) {
+            release_glue(input, mouse, keys, events);
+            held.swap_remove(i);
+        } else {
+            i += 1;
+        }
+    }
+    let Some(pad) = pad else {
+        return;
+    };
+    for (button, _) in map::BUTTONS {
+        if !pad.just_pressed(button) {
+            continue;
+        }
+        if let Some(input) = glue_input(button) {
+            match input {
+                GlueInput::Key(k) => glue_key(k, true, keys, events),
+                GlueInput::Mouse(b) => mouse.press(b),
+            }
+            held.push((button, input));
+        }
+    }
+    let right = pad.right_stick();
+    if let (Some(w), true) = (window, right.length() >= settings.deadzone) {
+        move_cursor(w, right, settings, time);
+    }
+}
+
+/// The right stick as the mouse cursor: faster the further it is pushed.
+fn move_cursor(w: &mut Window, right: Vec2, settings: &PadSettings, time: &Time) {
+    let speed = settings.cursor_speed * deflection(right.length(), settings.deadzone).powf(1.5);
+    let at = w
+        .cursor_position()
+        .unwrap_or(Vec2::new(w.width() / 2.0, w.height() / 2.0));
+    // Window y runs down; stick y runs up.
+    let to = at + Vec2::new(right.x, -right.y).normalize() * speed * time.delta_secs();
+    let to = to.clamp(Vec2::ZERO, Vec2::new(w.width() - 1.0, w.height() - 1.0));
+    w.set_cursor_position(Some(to));
 }
 
 /// A press in the cursor mode: A and X click (left, right), B runs the Escape ladder, the D-pad

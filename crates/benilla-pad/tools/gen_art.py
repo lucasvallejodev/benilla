@@ -10,7 +10,8 @@ Writes 32-bit TGAs (bottom-left origin, the form 1.12 loads) into addon/BenillaP
                   round icon's edge at 0.69
 - RingSelect.tga  the gold press / selection ring, same geometry
 - Disc.tga        a soft white disc (badges, shadows, the wheel's backdrop)
-- AutoRun.tga, Wheel.tga, Menu.tga  game-action icons, 64x64
+- one 64x64 icon per game action, window-wheel entry and bot command (`ICONS`): a dark slate
+                  tile with a bold glyph, so none reads as a spell
 
 Shapes are signed distance functions sampled 4x4 per pixel.
 """
@@ -187,63 +188,328 @@ def icon_base(x, y):
 
 WHITE = (0.96, 0.96, 0.92)
 GOLD = (1.0, 0.82, 0.25)
+RED = (0.95, 0.27, 0.22)
+GREEN = (0.35, 0.85, 0.35)
+BLUE = (0.35, 0.65, 1.0)
 
 
-def icon(symbol):
+def icon(glyph):
+    """A tile with a glyph: `glyph(x, y)` gives layers [(distance, colour), ...], painted in
+    order over a dark outline of their union."""
     def shade(x, y):
         out = icon_base(x, y)
-        cov, colour = symbol(x, y)
-        # A dark outline under the symbol, then the symbol.
-        out = over(out, (0.0, 0.0, 0.0, cov[1] * 0.7))
-        return over(out, colour + (cov[0],))
+        layers = glyph(x, y)
+        d = min(layer[0] for layer in layers)
+        out = over(out, (0.0, 0.0, 0.0, fill(d - 0.06) * 0.7))
+        for dist, colour in layers:
+            out = over(out, colour + (fill(dist),))
+        return out
     return shade
 
 
-def autorun(x, y):
-    # Two chevrons pointing right.
-    d = min(
-        min(sd_segment(x, y, -0.55, 0.45, -0.1, 0.0, 0.11), sd_segment(x, y, -0.1, 0.0, -0.55, -0.45, 0.11)),
-        min(sd_segment(x, y, 0.0, 0.45, 0.45, 0.0, 0.11), sd_segment(x, y, 0.45, 0.0, 0.0, -0.45, 0.11)),
-    )
-    return (fill(d), fill(d - 0.06)), WHITE
+def seg(x, y, pts, r):
+    """A polyline of round-capped strokes."""
+    return min(sd_segment(x, y, pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], r)
+               for i in range(len(pts) - 1))
 
 
-def wheel(x, y):
-    # Eight dots round a ring, one of them gold, and a hub.
+def ring_d(x, y, cx, cy, r, w):
+    return abs(sd_circle(x, y, cx, cy, r)) - w
+
+
+def bust(x, y, cx=0.0, cy=0.0, k=1.0):
+    """A head and shoulders."""
+    head = sd_circle(x, y, cx, cy + 0.32 * k, 0.24 * k)
+    body = max(sd_circle(x, y, cx, cy - 0.5 * k, 0.5 * k), -(y - (cy - 0.52 * k)))
+    return min(head, body)
+
+
+def arrow(x, y, ax, ay, bx, by, r=0.09, head=0.26):
+    """A stroke from a to b with a chevron at b."""
+    dx, dy = bx - ax, by - ay
+    n = math.hypot(dx, dy)
+    ux, uy = dx / n, dy / n
+    px, py = -uy, ux
+    l = (bx - ux * head + px * head, by - uy * head + py * head)
+    rr = (bx - ux * head - px * head, by - uy * head - py * head)
+    return min(sd_segment(x, y, ax, ay, bx, by, r), seg(x, y, [l, (bx, by), rr], r))
+
+
+def crosshair(x, y):
+    d = ring_d(x, y, 0, 0, 0.5, 0.075)
+    for a in range(4):
+        c, sn = math.cos(a * math.pi / 2), math.sin(a * math.pi / 2)
+        d = min(d, sd_segment(x, y, 0.36 * c, 0.36 * sn, 0.74 * c, 0.74 * sn, 0.075))
+    return min(d, sd_circle(x, y, 0, 0, 0.1))
+
+
+def bag_d(x, y):
+    body = sd_box(x, y, 0, -0.14, 0.5, 0.42, 0.2)
+    neck = sd_box(x, y, 0, 0.36, 0.3, 0.1, 0.06)
+    tie = sd_segment(x, y, -0.36, 0.5, 0.36, 0.5, 0.07)
+    return min(body, neck, tie)
+
+
+def shield_d(x, y):
+    # A flat-topped body over a rounded point.
+    return max(min(sd_box(x, y, 0, 0.22, 0.48, 0.34, 0.08), sd_circle(x, y, 0, -0.06, 0.5)),
+               y - 0.6)
+
+
+def sword_d(x, y):
+    blade = sd_segment(x, y, -0.2, -0.2, 0.55, 0.55, 0.085)
+    guard = sd_segment(x, y, -0.42, 0.02, 0.02, -0.42, 0.075)
+    grip = sd_segment(x, y, -0.3, -0.3, -0.52, -0.52, 0.09)
+    return min(blade, guard, grip)
+
+
+def g_autorun(x, y):
+    return [(min(seg(x, y, [(-0.55, 0.45), (-0.1, 0.0), (-0.55, -0.45)], 0.11),
+                 seg(x, y, [(0.0, 0.45), (0.45, 0.0), (0.0, -0.45)], 0.11)), WHITE)]
+
+
+def g_wheel(x, y):
     d = sd_circle(x, y, 0, 0, 0.14)
-    gold = 1e9
-    for i in range(8):
+    for i in range(1, 8):
         a = math.radians(90 - i * 45)
-        dd = sd_circle(x, y, 0.58 * math.cos(a), 0.58 * math.sin(a), 0.13)
-        if i == 0:
-            gold = dd
-        else:
-            d = min(d, dd)
-    cov = fill(min(d, gold))
-    halo = fill(min(d, gold) - 0.06)
-    colour = GOLD if gold < d and gold < 0.05 else WHITE
-    return (cov, halo), colour
+        d = min(d, sd_circle(x, y, 0.58 * math.cos(a), 0.58 * math.sin(a), 0.13))
+    return [(d, WHITE), (sd_circle(x, y, 0, 0.58, 0.13), GOLD)]
 
 
-def menu(x, y):
-    # A gamepad: a rounded body with two grips, then the D-pad and face buttons cut out.
+def g_menu(x, y):
     body = min(sd_box(x, y, 0, 0.08, 0.62, 0.3, 0.28),
                sd_circle(x, y, -0.48, -0.2, 0.3), sd_circle(x, y, 0.48, -0.2, 0.3))
     dpad = min(sd_box(x, y, -0.42, 0.05, 0.16, 0.05), sd_box(x, y, -0.42, 0.05, 0.05, 0.16))
     face = min(sd_circle(x, y, 0.42, 0.18, 0.06), sd_circle(x, y, 0.42, -0.08, 0.06),
                sd_circle(x, y, 0.29, 0.05, 0.06), sd_circle(x, y, 0.55, 0.05, 0.06))
-    d = max(body, -min(dpad, face))
-    return (fill(d), fill(body - 0.06)), WHITE
+    return [(max(body, -min(dpad, face)), WHITE)]
 
+
+def g_jump(x, y):
+    return [(arrow(x, y, 0, -0.3, 0, 0.6, 0.1, 0.3), WHITE),
+            (sd_segment(x, y, -0.5, -0.58, 0.5, -0.58, 0.08), GOLD)]
+
+
+def g_interact(x, y):
+    # An open hand: a palm, four fingers and a thumb.
+    d = sd_box(x, y, 0.02, -0.3, 0.3, 0.26, 0.14)
+    for i, top in enumerate((0.42, 0.58, 0.56, 0.4)):
+        fx = -0.21 + i * 0.155
+        d = min(d, sd_segment(x, y, fx, -0.15, fx, top, 0.07))
+    d = min(d, sd_segment(x, y, -0.3, -0.36, -0.55, -0.05, 0.08))
+    return [(d, WHITE)]
+
+
+def g_back(x, y):
+    return [(min(sd_segment(x, y, -0.42, -0.42, 0.42, 0.42, 0.13),
+                 sd_segment(x, y, -0.42, 0.42, 0.42, -0.42, 0.13)), RED)]
+
+
+def g_inspect(x, y):
+    return [(min(ring_d(x, y, -0.12, 0.14, 0.38, 0.08),
+                 sd_segment(x, y, 0.18, -0.16, 0.56, -0.54, 0.11)), WHITE)]
+
+
+def g_target(colour):
+    return lambda x, y: [(crosshair(x, y), colour)]
+
+
+def g_self(x, y):
+    return [(bust(x, y, 0, -0.02, 1.0), WHITE), (ring_d(x, y, 0, 0, 0.84, 0.045), GOLD)]
+
+
+def g_attack(x, y):
+    return [(sword_d(x, y), WHITE)]
+
+
+def g_sit(x, y):
+    # A chair in profile.
+    return [(min(sd_segment(x, y, -0.34, 0.6, -0.34, -0.6, 0.085),
+                 sd_segment(x, y, -0.34, -0.05, 0.4, -0.05, 0.085),
+                 sd_segment(x, y, 0.4, -0.05, 0.4, -0.6, 0.085)), WHITE)]
+
+
+def g_potion(x, y):
+    flask = min(sd_circle(x, y, 0, -0.2, 0.44), sd_box(x, y, 0, 0.36, 0.14, 0.26, 0.03))
+    liquid = max(sd_circle(x, y, 0, -0.2, 0.33), y + 0.14)
+    cork = sd_box(x, y, 0, 0.64, 0.2, 0.07, 0.04)
+    return [(flask, WHITE), (liquid, RED), (cork, GOLD)]
+
+
+def g_quest(x, y):
+    return [(min(sd_segment(x, y, 0, 0.58, 0, -0.08, 0.14), sd_circle(x, y, 0, -0.5, 0.15)), GOLD)]
+
+
+def g_bot(x, y):
+    head = sd_box(x, y, 0, -0.12, 0.5, 0.38, 0.14)
+    eyes = min(sd_circle(x, y, -0.2, -0.04, 0.1), sd_circle(x, y, 0.2, -0.04, 0.1))
+    mouth = sd_segment(x, y, -0.18, -0.32, 0.18, -0.32, 0.04)
+    antenna = min(sd_segment(x, y, 0, 0.26, 0, 0.52, 0.05), sd_circle(x, y, 0, 0.6, 0.1))
+    return [(max(head, -min(eyes, mouth)), WHITE), (antenna, GOLD)]
+
+
+def g_chat(x, y):
+    bubble = min(sd_box(x, y, 0, 0.12, 0.6, 0.38, 0.2),
+                 seg(x, y, [(-0.3, -0.2), (-0.42, -0.6), (-0.02, -0.24)], 0.06))
+    dots = min(sd_circle(x, y, -0.26, 0.12, 0.08), sd_circle(x, y, 0, 0.12, 0.08),
+               sd_circle(x, y, 0.26, 0.12, 0.08))
+    return [(max(bubble, -dots), WHITE)]
+
+
+def g_character(x, y):
+    return [(bust(x, y, 0, 0.0, 1.15), WHITE)]
+
+
+def g_bags(x, y):
+    return [(bag_d(x, y), WHITE), (sd_circle(x, y, 0, -0.14, 0.12), GOLD)]
+
+
+def g_book(x, y):
+    cover = sd_box(x, y, 0, 0, 0.5, 0.6, 0.08)
+    spine = sd_box(x, y, -0.32, 0, 0.035, 0.6)
+    star = min(sd_segment(x, y, 0.1, 0.22, 0.1, -0.22, 0.05), sd_segment(x, y, -0.12, 0, 0.32, 0, 0.05))
+    return [(max(cover, -spine), WHITE), (star, BLUE)]
+
+
+def g_star(x, y):
+    # A five-pointed star as the union of its five spikes.
+    d = sd_circle(x, y, 0, 0, 0.26)
+    for i in range(5):
+        a = math.radians(90 + i * 72)
+        tx, ty = 0.68 * math.cos(a), 0.68 * math.sin(a)
+        # A spike: a stroke that thins toward its tip.
+        px, py = x - 0, y - 0
+        t = clamp((px * tx + py * ty) / (tx * tx + ty * ty))
+        d = min(d, math.hypot(px - tx * t, py - ty * t) - 0.2 * (1 - t))
+    return [(d, GOLD)]
+
+
+def g_log(x, y):
+    page = sd_box(x, y, 0, 0, 0.46, 0.62, 0.08)
+    lines = min(sd_segment(x, y, -0.24, 0.3, 0.24, 0.3, 0.05),
+                sd_segment(x, y, -0.24, 0.02, 0.24, 0.02, 0.05),
+                sd_segment(x, y, -0.24, -0.26, 0.08, -0.26, 0.05))
+    return [(max(page, -lines), WHITE)]
+
+
+def g_map(x, y):
+    # A compass: a ring and a two-tone needle.
+    north = max(abs(x) + abs(y - 0.0) * 0.34 - 0.17, -y)
+    south = max(abs(x) + abs(y) * 0.34 - 0.17, y)
+    return [(ring_d(x, y, 0, 0, 0.62, 0.075), WHITE), (south, WHITE), (north, RED)]
+
+
+def g_social(x, y):
+    return [(bust(x, y, 0.3, 0.0, 0.8), (0.7, 0.72, 0.75)), (bust(x, y, -0.22, -0.08, 0.95), WHITE)]
+
+
+def g_hammer(x, y):
+    handle = sd_segment(x, y, -0.5, -0.5, 0.2, 0.2, 0.075)
+    head = sd_segment(x, y, 0.0, 0.52, 0.5, 0.02, 0.18)
+    return [(handle, GOLD), (head, WHITE)]
+
+
+def g_gear(x, y):
+    d = sd_circle(x, y, 0, 0, 0.46)
+    for i in range(8):
+        a = i * math.pi / 4
+        d = min(d, sd_segment(x, y, 0.42 * math.cos(a), 0.42 * math.sin(a),
+                              0.64 * math.cos(a), 0.64 * math.sin(a), 0.1))
+    return [(max(d, -sd_circle(x, y, 0, 0, 0.2)), WHITE)]
+
+
+def g_emote(x, y):
+    face = sd_circle(x, y, 0, 0, 0.64)
+    eyes = min(sd_circle(x, y, -0.24, 0.18, 0.09), sd_circle(x, y, 0.24, 0.18, 0.09))
+    smile = max(ring_d(x, y, 0, 0.0, 0.36, 0.055), y + 0.1)
+    return [(max(face, -min(eyes, smile)), GOLD)]
+
+
+def g_follow(x, y):
+    # A leader dot with an arrow coming after it.
+    return [(arrow(x, y, -0.62, 0, 0.18, 0, 0.09, 0.26), WHITE), (sd_circle(x, y, 0.56, 0, 0.16), GOLD)]
+
+
+def g_stay(x, y):
+    return [(min(sd_box(x, y, -0.24, 0, 0.13, 0.5, 0.05), sd_box(x, y, 0.24, 0, 0.13, 0.5, 0.05)), WHITE)]
+
+
+def g_flee(x, y):
+    lines = min(sd_segment(x, y, 0.3, 0.3, 0.62, 0.3, 0.05), sd_segment(x, y, 0.3, -0.3, 0.62, -0.3, 0.05))
+    return [(arrow(x, y, 0.6, 0, -0.6, 0, 0.1, 0.3), WHITE), (lines, GOLD)]
+
+
+def g_pull(x, y):
+    return [(ring_d(x, y, 0.2, -0.2, 0.36, 0.07), RED),
+            (arrow(x, y, -0.66, 0.66, 0.12, -0.12, 0.08, 0.24), WHITE)]
+
+
+def g_summon(x, y):
+    return [(min(ring_d(x, y, 0, 0, 0.62, 0.06), ring_d(x, y, 0, 0, 0.36, 0.06)), BLUE),
+            (sd_circle(x, y, 0, 0, 0.14), WHITE)]
+
+
+def g_check(x, y):
+    return [(seg(x, y, [(-0.5, 0.0), (-0.14, -0.4), (0.54, 0.44)], 0.13), GREEN)]
+
+
+def g_loot(x, y):
+    return [(bag_d(x, y), GOLD), (min(sd_segment(x, y, 0, 0.06, 0, -0.32, 0.045),
+                                      ring_d(x, y, 0, -0.14, 0.14, 0.04)), (0.25, 0.18, 0.05))]
+
+
+def g_shield(x, y):
+    return [(shield_d(x, y), WHITE)]
+
+
+def g_tank(x, y):
+    return [(shield_d(x, y), WHITE), (sword_d(x * 1.5, y * 1.5 + 0.1) / 1.5, RED)]
+
+
+def g_maxdps(x, y):
+    return [(min(seg(x, y, [(-0.45, -0.1), (0, 0.35), (0.45, -0.1)], 0.11),
+                 seg(x, y, [(-0.45, -0.55), (0, -0.1), (0.45, -0.55)], 0.11)), RED)]
+
+
+def g_mana(x, y):
+    # A drop: a circle with a pointed top.
+    top = max(abs(x) * 1.25 + (y - 0.62) * 0.62, -(y - 0.0))
+    return [(min(sd_circle(x, y, 0, -0.18, 0.4), top), BLUE)]
+
+
+def g_cross(colour):
+    return lambda x, y: [(min(sd_box(x, y, 0, 0, 0.16, 0.56, 0.05), sd_box(x, y, 0, 0, 0.56, 0.16, 0.05)), colour)]
+
+
+def g_dot(x, y):
+    return [(sd_circle(x, y, 0, 0, 0.3), WHITE)]
+
+
+ICONS = {
+    # Game actions.
+    "AutoRun": g_autorun, "Wheel": g_wheel, "Menu": g_menu, "Jump": g_jump,
+    "Interact": g_interact, "Back": g_back, "Inspect": g_inspect,
+    "TargetEnemy": g_target(RED), "TargetFriend": g_target(GREEN), "TargetSelf": g_self,
+    "Attack": g_attack, "Sit": g_sit, "Consumables": g_potion, "QuestItem": g_quest,
+    "BotWheel": g_bot, "QuickChat": g_chat,
+    # The window wheel.
+    "Character": g_character, "Bags": g_bags, "Spellbook": g_book, "Talents": g_star,
+    "QuestLog": g_log, "Map": g_map, "Social": g_social, "Professions": g_hammer,
+    "GameMenu": g_gear, "Emote": g_emote,
+    # Bot commands.
+    "BotFollow": g_follow, "BotStay": g_stay, "BotFlee": g_flee, "BotPull": g_pull,
+    "BotSummon": g_summon, "BotAccept": g_check, "BotLoot": g_loot, "BotGuard": g_shield,
+    "BotTank": g_tank, "BotMaxDps": g_maxdps, "BotMana": g_mana,
+    "BotRelease": g_cross(WHITE), "BotRevive": g_cross(GREEN), "BotOther": g_dot,
+}
 
 ART_FILES = {
     "Ring.tga": (128, ring),
     "RingSelect.tga": (128, ring_select),
     "Disc.tga": (64, disc),
-    "AutoRun.tga": (64, icon(autorun)),
-    "Wheel.tga": (64, icon(wheel)),
-    "Menu.tga": (64, icon(menu)),
 }
+for _name, _glyph in ICONS.items():
+    ART_FILES[_name + ".tga"] = (64, icon(_glyph))
 
 
 def main():
@@ -255,16 +521,20 @@ def main():
         images[name] = rows
         print("wrote", name)
     if "--preview" in sys.argv:
-        # Every image on a mid-grey sheet, at 128 px each.
+        # Every image on a mid-grey sheet, 72 px each, ten to a row.
         path = sys.argv[sys.argv.index("--preview") + 1]
-        cell = 128
-        sheet = [[(0.32, 0.34, 0.3, 1.0)] * (cell * len(images)) for _ in range(cell)]
-        for k, rows in enumerate(images.values()):
+        cell, per_row = 72, 10
+        names = list(images)
+        rows_n = (len(names) + per_row - 1) // per_row
+        sheet = [[(0.32, 0.34, 0.3, 1.0)] * (cell * per_row) for _ in range(cell * rows_n)]
+        for k, name in enumerate(names):
+            rows = images[name]
             n = len(rows)
-            for py in range(cell):
-                for px in range(cell):
-                    src = rows[py * n // cell][px * n // cell]
-                    sheet[py][k * cell + px] = over(sheet[py][k * cell + px], src)
+            ox, oy = (k % per_row) * cell, (k // per_row) * cell
+            for py in range(cell - 8):
+                for px in range(cell - 8):
+                    src = rows[py * n // (cell - 8)][px * n // (cell - 8)]
+                    sheet[oy + 4 + py][ox + 4 + px] = over(sheet[oy + 4 + py][ox + 4 + px], src)
         write_png(path, sheet)
         print("preview", path)
 

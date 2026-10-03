@@ -149,6 +149,13 @@ pub(crate) fn saved_account_path() -> Option<PathBuf> {
     home().map(|h| h.join("account"))
 }
 
+/// `benilla-config/autologin`: the account and password the login screen's "Log in
+/// automatically" checkbox keeps (a deviation: 1.12 remembers the account name only), two lines,
+/// plain text.
+pub(crate) fn autologin_path() -> Option<PathBuf> {
+    home().map(|h| h.join("autologin"))
+}
+
 /// `benilla-config/chat/<realm>-<character>.txt`: the chat windows' tint, alpha, font size and
 /// lock, the four the reference keeps in its per-character `chat-cache.txt`.
 pub(crate) fn chat_character_path(realm: &str, character: &str) -> Option<PathBuf> {

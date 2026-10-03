@@ -1,5 +1,6 @@
--- The game actions a pad button can hold instead of an action slot. `command` is the binding
--- command the Rust side runs: a stock 1.12 one (JUMP, TOGGLEAUTORUN, ...), one of this addon's
+-- The game actions a pad button can hold instead of an action slot. Their icons are this
+-- addon's own (tools/gen_art.py): a slate tile with a glyph, so none reads as a spell.
+-- `command` is the binding command the Rust side runs: a stock 1.12 one (JUMP, TOGGLEAUTORUN, ...), one of this addon's
 -- (Bindings.xml), or a native one with a leading "@" that the Rust side handles itself.
 
 local P = BenillaPad
@@ -10,21 +11,21 @@ local function add(id, label, icon, command)
     A[id] = { id = id, label = label, icon = icon, command = command }
 end
 
-add("jump", "Jump", "Interface\\Icons\\Ability_Rogue_Sprint", "JUMP")
-add("interact", "Interact / Loot", "Interface\\Cursor\\Pickup", "@INTERACT")
-add("back", "Back / Stop casting", "Interface\\Buttons\\UI-GroupLoot-Pass-Up", "BENILLAPAD_BACK")
-add("inspect", "Inspect", "Interface\\Icons\\INV_Misc_Spyglass_03", "BENILLAPAD_INSPECT")
-add("targetenemy", "Target enemy", "Interface\\Cursor\\Attack", "BENILLAPAD_TARGETENEMY")
-add("targetfriend", "Target friend", "Interface\\Icons\\Spell_Holy_FlashHeal", "BENILLAPAD_TARGETFRIEND")
-add("targetself", "Target yourself", "Interface\\Icons\\Spell_Holy_PowerWordShield", "BENILLAPAD_TARGETSELF")
-add("attack", "Attack", "Interface\\Icons\\INV_Sword_04", "BENILLAPAD_ATTACK")
+add("jump", "Jump", P.ART .. "Jump", "JUMP")
+add("interact", "Interact / Loot", P.ART .. "Interact", "@INTERACT")
+add("back", "Back / Stop casting", P.ART .. "Back", "BENILLAPAD_BACK")
+add("inspect", "Inspect", P.ART .. "Inspect", "BENILLAPAD_INSPECT")
+add("targetenemy", "Target enemy", P.ART .. "TargetEnemy", "BENILLAPAD_TARGETENEMY")
+add("targetfriend", "Target friend", P.ART .. "TargetFriend", "BENILLAPAD_TARGETFRIEND")
+add("targetself", "Target yourself", P.ART .. "TargetSelf", "BENILLAPAD_TARGETSELF")
+add("attack", "Attack", P.ART .. "Attack", "BENILLAPAD_ATTACK")
 add("autorun", "Auto run", P.ART .. "AutoRun", "TOGGLEAUTORUN")
-add("sit", "Sit / Stand", "Interface\\Icons\\Spell_Nature_Sleep", "SITORSTAND")
+add("sit", "Sit / Stand", P.ART .. "Sit", "SITORSTAND")
 add("wheel", "Window wheel", P.ART .. "Wheel", "BENILLAPAD_WHEEL")
-add("consumables", "Consumables wheel", "Interface\\Icons\\INV_Potion_54", "BENILLAPAD_CONSUMABLES")
-add("questitem", "Use quest item", "Interface\\Icons\\INV_Misc_Note_02", "BENILLAPAD_QUESTITEM")
-add("botwheel", "Bot wheel", "Interface\\Icons\\Ability_Tracking", "BENILLAPAD_BOTWHEEL")
-add("quickchat", "Quick Chat", "Interface\\Icons\\INV_Letter_15", "BENILLAPAD_CHAT")
+add("consumables", "Consumables wheel", P.ART .. "Consumables", "BENILLAPAD_CONSUMABLES")
+add("questitem", "Use quest item", P.ART .. "QuestItem", "BENILLAPAD_QUESTITEM")
+add("botwheel", "Bot wheel", P.ART .. "BotWheel", "BENILLAPAD_BOTWHEEL")
+add("quickchat", "Quick Chat", P.ART .. "QuickChat", "BENILLAPAD_CHAT")
 add("menu", "Controller menu", P.ART .. "Menu", "BENILLAPAD_MENU")
 
 -- The bodies of this addon's action rows (Bindings.xml).

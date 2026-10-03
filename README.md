@@ -1,12 +1,144 @@
 <div align="center">
-  <h1>benilla</h1>
-  <p><b>A complete World of Warcraft 1.12.1 client, written from scratch in Rust and <a href="https://bevy.org">Bevy</a></b></p>
+  <h1>benilla, with a controller</h1>
+  <p><b>A fork of <a href="https://github.com/samwhosung/benilla">benilla</a>, the from-scratch World of Warcraft 1.12.1 client in Rust and <a href="https://bevy.org">Bevy</a>, aiming at full controller support</b></p>
   <p>
-    <a href="https://discord.gg/wJSJx467G4"><img src="https://img.shields.io/discord/1529280129518538922?style=for-the-badge&logo=discord&logoColor=white&label=discord&color=5865F2" alt="Discord"></a>
-    <a href="https://www.youtube.com/playlist?list=PLdCnpZNKxyb8"><img src="https://img.shields.io/badge/devlog-youtube-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="YouTube devlog"></a>
     <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue?style=for-the-badge" alt="License"></a>
   </p>
+  <img src="docs/images/controller-banner.webp" alt="Elwynn Forest played with a controller: the gamepad bar at the bottom of the screen, no stock action bar">
 </div>
+
+This fork adds gamepad play to benilla: you can log in, pick a character, fight, loot, use every
+game window, chat and command your bots without touching the keyboard or mouse. 1.12.1 never had
+controller support, so none of this is in upstream benilla, which stays a faithful 1.12.1 client.
+Everything else is upstream's work; see [About benilla](#about-benilla) below.
+
+The controller support lives in its own crate, [`crates/benilla-pad`](crates/benilla-pad), built on
+top of benilla the way upstream asks a feature 1.12.1 lacks to be built. It has two halves:
+
+- **The pad, in Rust.** It reads the controller, moves you and the camera, and runs every button
+  press as a 1.12 key binding, the path a key press takes.
+- **The interface, as a 1.12 addon** (`BenillaPad`, shipped inside the binary and installed into
+  `benilla-config/AddOns` at start). It draws the gamepad bar, the wheels and the menus with the
+  stock 1.12 interface functions, and its art is drawn from scratch by
+  [`tools/gen_art.py`](crates/benilla-pad/tools/gen_art.py).
+
+A few small changes reach into benilla itself: an Interact action (1.12 can only interact with a
+right-click), an optional "Log in automatically" tick on the login screen, and a loot-all hook.
+
+## What the controller covers
+
+- **Before the world:** the login, realm and character screens, and an optional automatic login.
+- **Moving and looking:** left stick to move in eight directions, right stick for the camera,
+  zoom with a shoulder held.
+- **Fighting:** four layers of buttons (no trigger, LT, RT, LT+RT) on the D-pad, the face buttons,
+  the shoulders and the stick clicks, 48 slots in all. Spells, items and macros sit in real 1.12
+  action slots, so the server keeps them, and the bar shows cooldowns, range and mana like the
+  stock bar. Druid forms, warrior stances and stealth get their own sets.
+- **Interact:** one button to talk, trade, loot (everything at once), skin or attack, on your
+  target or on the nearest corpse, NPC, chest, herb or mailbox in front of you.
+- **Game windows:** bags, vendors, quests, trainers, mail, the auction house and the rest take the
+  right stick as a mouse cursor, with the D-pad jumping between buttons.
+- **Wheels:** a window wheel for every game window and emotes, a consumables wheel for potions,
+  food, bandages and weapon oils, and a quest-item button.
+- **Chat:** phrase tiles for every channel and an on-screen keyboard.
+- **Bots:** for [cMaNGOS playerbots](https://github.com/cmangos/playerbots): log your account's
+  characters in and out, command them from tiles by category, and keep your favourite orders on a
+  bot wheel.
+- **Setup:** an in-game keybind screen, a spell picker, bind-by-pressing-the-combo, and a settings
+  menu, all driven by the controller.
+
+While the gamepad bar is showing, the stock action bars, bags and micro menu are hidden (the pet
+bar stays); unplug the controller and they come back.
+
+## Building the client
+
+You need what benilla needs: an English 1.12.1 client (build 5875) for the game data, a 1.12.1
+server with Warden off, stable Rust and a C compiler (on Windows, the MSVC build tools the Rust
+installer sets up). Any controller the operating system sees as a gamepad should work; Xbox and
+PlayStation button symbols are both drawn.
+
+**To play from the source tree**, with a link named `WoW` at the repo root pointing at your
+install (or `WOW_DATA` set to its `Data` folder):
+
+```sh
+cargo run -p benilla-pad --profile play
+```
+
+**To build the standalone client**, the optimized player build with the developer tools compiled
+out:
+
+```sh
+cargo build -p benilla-pad --profile ship --no-default-features
+```
+
+The binary is `target/ship/benilla-pad` (`benilla-pad.exe` on Windows). Put it in a folder of its
+own with the game data beside it, either a `Data` folder or a `WoW/Data` folder (a link or
+junction to your install works). It keeps its settings, addons and the controller addon in a
+`benilla-config` folder beside the binary, and never writes into the install.
+
+The server defaults to `localhost:3724`; set another from the Realmlist button on the login
+screen.
+
+## Using the controller
+
+Plug the controller in before you start. Xbox names are used below.
+
+**Login and character screens**
+
+| Button | Does |
+|---|---|
+| A | Enter: log in, enter the world, a dialog's Okay |
+| B | Escape: back, Cancel |
+| D-pad up / down | Choose a character or realm |
+| Y | Tab between the account and password boxes |
+| Right stick, X | Move the cursor, click |
+
+Tick **Log in automatically** on the login screen and log in once with the keyboard: from then on
+the client logs in by itself at start and you land on the character screen. The account and
+password are kept in plain text in `benilla-config/autologin`, so use it on a server you run, not
+on someone else's.
+
+**In the world**
+
+| Button | No trigger | LT / RT / LT+RT held |
+|---|---|---|
+| Left stick | Move | Move |
+| Right stick | Camera (with LB or RB held: zoom) | Camera |
+| D-pad | Action slots | Action slots |
+| A | Jump | Action slot (LT+RT+A: window wheel) |
+| X | Interact / loot | Action slot (LT+RT+X: consumables wheel) |
+| B | Back: stop targeting, stop casting, clear target | Action slot (LT+RT+B: quest item) |
+| Y | Inspect | Action slot (LT+RT+Y: bot wheel) |
+| LB / RB | Target nearest friend / enemy | Action slots |
+| L3 / R3 | Auto run / target yourself | Action slots |
+| Start | Window wheel | |
+| Select | Controller menu | |
+
+Every button on every layer can be changed. Press **Select** and open **Keybinds**: the D-pad
+moves, A picks a button up and puts it down, X clears it, Y opens the spell list, and holding a
+trigger shows that layer. You can also drag spells and items onto the bar with the mouse.
+
+**In a game window** (bags, vendor, quest, loot, a Yes / No box…)
+
+| Button | Does |
+|---|---|
+| Right stick | Moves the cursor |
+| A / X | Left click / right click |
+| D-pad | Jumps to the nearest button |
+| LB / RB | Scroll up / down |
+| B | Closes the window |
+
+**In a wheel:** point with either stick, A to choose, B to close, LB / RB for pages.
+
+**Settings** are under Select: camera speed and direction, stick dead zone, cast on press or on
+release, the bar's size and place, button symbols, and switches for the cursor, the cooldown row
+and the stock bars. `/pad` in chat opens the same menu.
+
+---
+
+# About benilla
+
+Everything below is upstream benilla's own description, and it applies to this fork unchanged.
 
 benilla plays the whole game: character creation, questing and professions, dungeons and raids,
 battlegrounds and honor, groups, guilds, trade, mail and the auction house, on the stock 1.12
@@ -110,6 +242,8 @@ It ships **no Blizzard content**: no art, models, sounds, maps, MPQ contents or 
 provide your own legally obtained 1.12.1 client, and the stock interface runs off its FrameXML at
 runtime. The few files under `crates/benilla-app/assets/ui/` are our own, not copies of it:
 adapters over stock files, and the settings windows and script error log benilla draws itself.
+The controller addon and its art under `crates/benilla-pad/addon/` are this fork's own, drawn by a
+script in the repo. The screenshot at the top shows the game's art as your own install renders it.
 
 World of Warcraft is a trademark of Blizzard Entertainment, Inc. Our own code is licensed under
 [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your option. The two vendored components

@@ -49,8 +49,8 @@ local WINDOW_PAGES = {
     {
         title = "Windows",
         entries = {
-            { label = "Character", icon = ICON .. "INV_Chest_Cloth_21", run = runBinding("TOGGLECHARACTER0") },
-            { label = "Bags", icon = ICON .. "INV_Misc_Bag_08", run = runBinding("OPENALLBAGS"),
+            { label = "Character", icon = P.ART .. "Character", run = runBinding("TOGGLECHARACTER0") },
+            { label = "Bags", icon = P.ART .. "Bags", run = runBinding("OPENALLBAGS"),
                 sub = function()
                     local free = 0
                     for bag = 0, 4 do
@@ -60,12 +60,12 @@ local WINDOW_PAGES = {
                     end
                     return free .. " free"
                 end },
-            { label = "Spellbook", icon = ICON .. "INV_Misc_Book_09", run = runBinding("TOGGLESPELLBOOK") },
-            { label = "Talents", icon = ICON .. "Ability_Marksmanship", run = runBinding("TOGGLETALENTS") },
-            { label = "Quest Log", icon = ICON .. "INV_Misc_Note_01", run = runBinding("TOGGLEQUESTLOG") },
-            { label = "World Map", icon = ICON .. "INV_Misc_Map_01", run = runBinding("TOGGLEWORLDMAP") },
-            { label = "Social", icon = ICON .. "Spell_Holy_WordFortitude", run = runBinding("TOGGLESOCIAL") },
-            { label = "Professions", icon = ICON .. "Trade_BlackSmithing",
+            { label = "Spellbook", icon = P.ART .. "Spellbook", run = runBinding("TOGGLESPELLBOOK") },
+            { label = "Talents", icon = P.ART .. "Talents", run = runBinding("TOGGLETALENTS") },
+            { label = "Quest Log", icon = P.ART .. "QuestLog", run = runBinding("TOGGLEQUESTLOG") },
+            { label = "World Map", icon = P.ART .. "Map", run = runBinding("TOGGLEWORLDMAP") },
+            { label = "Social", icon = P.ART .. "Social", run = runBinding("TOGGLESOCIAL") },
+            { label = "Professions", icon = P.ART .. "Professions",
                 run = function()
                     local i = professionIndex()
                     if i then
@@ -75,21 +75,21 @@ local WINDOW_PAGES = {
                     end
                 end },
             { label = "Controller", icon = P.ART .. "Menu", run = function() P.Menu.Open() end },
-            { label = "Quick Chat", icon = ICON .. "INV_Letter_15", run = function() P.Chat.Open() end },
-            { label = "Game Menu", icon = ICON .. "INV_Misc_Gear_01", run = runBinding("TOGGLEGAMEMENU") },
+            { label = "Quick Chat", icon = P.ART .. "QuickChat", run = function() P.Chat.Open() end },
+            { label = "Game Menu", icon = P.ART .. "GameMenu", run = runBinding("TOGGLEGAMEMENU") },
         },
     },
     {
         title = "Emotes",
         entries = {
-            { label = "Sit / Stand", icon = ICON .. "Spell_Nature_Sleep", run = function() SitOrStand() end },
-            { label = "Wave", icon = ICON .. "Spell_Holy_Heal", run = emote("WAVE") },
-            { label = "Dance", icon = ICON .. "Spell_Holy_HolyNova", run = emote("DANCE") },
-            { label = "Cheer", icon = ICON .. "Spell_Holy_Excorcism", run = emote("CHEER") },
-            { label = "Bow", icon = ICON .. "Spell_Holy_PrayerOfHealing", run = emote("BOW") },
-            { label = "Thank", icon = ICON .. "Spell_Holy_Renew", run = emote("THANK") },
-            { label = "Laugh", icon = ICON .. "Spell_Holy_MindVision", run = emote("LAUGH") },
-            { label = "Point", icon = ICON .. "Ability_Hunter_SniperShot", run = emote("POINT") },
+            { label = "Sit / Stand", icon = P.ART .. "Sit", run = function() SitOrStand() end },
+            { label = "Wave", icon = P.ART .. "Emote", run = emote("WAVE") },
+            { label = "Dance", icon = P.ART .. "Emote", run = emote("DANCE") },
+            { label = "Cheer", icon = P.ART .. "Emote", run = emote("CHEER") },
+            { label = "Bow", icon = P.ART .. "Emote", run = emote("BOW") },
+            { label = "Thank", icon = P.ART .. "Emote", run = emote("THANK") },
+            { label = "Laugh", icon = P.ART .. "Emote", run = emote("LAUGH") },
+            { label = "Point", icon = P.ART .. "Emote", run = emote("POINT") },
         },
     },
 }
@@ -157,11 +157,13 @@ end
 
 -- The bot wheel's entries: the favourite bot commands (Bots.lua), each with an icon.
 local BOT_ICONS = {
-    follow = "Ability_Tracking", stay = "Spell_Nature_TimeStop", flee = "Ability_Rogue_Sprint",
-    summon = "Spell_Shadow_Twilight", attack = "Ability_Warrior_Charge", pull = "Ability_Hunter_SniperShot",
-    acceptall = "INV_Misc_Note_01", loot = "INV_Misc_Bag_08", guard = "Ability_Warrior_DefensiveStance",
-    tankattack = "Ability_Warrior_Sunder", maxdps = "Ability_Warrior_InnerRage",
-    savemana = "Spell_Nature_Lightning", release = "Spell_Holy_Resurrection", revive = "Spell_Holy_Resurrection",
+    follow = "BotFollow", stay = "BotStay", guard = "BotGuard", flee = "BotFlee",
+    summon = "BotSummon", attack = "Attack", tankattack = "BotTank", pull = "BotPull",
+    maxdps = "BotMaxDps", savemana = "BotMana", acceptall = "BotAccept", autoaccept = "BotAccept",
+    quests = "QuestLog", talk = "QuickChat", loot = "BotLoot", addallloot = "BotLoot",
+    inventory = "Bags", release = "BotRelease", revive = "BotRevive", selfres = "BotRevive",
+    ready = "BotAccept", cast = "Spellbook", whoami = "Character", stats = "Character",
+    where = "Map", home = "Map", trainer = "Talents", repair = "Professions",
 }
 
 local function botEntries()
@@ -170,7 +172,7 @@ local function botEntries()
     for i = 1, table.getn(favorites) do
         local c = P.Bots.Command(favorites[i])
         if c then
-            local icon = ICON .. (BOT_ICONS[c.id] or "INV_Misc_QuestionMark")
+            local icon = P.ART .. (BOT_ICONS[c.id] or "BotOther")
             table.insert(list, { label = c.label, icon = icon, run = function() P.Bots.Run(c) end })
         end
     end

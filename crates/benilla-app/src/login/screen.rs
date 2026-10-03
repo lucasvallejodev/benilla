@@ -35,6 +35,8 @@ pub(crate) enum LoginAction {
     Login,
     Quit,
     ToggleSave,
+    /// Deviation: the "Log in automatically" checkbox.
+    ToggleAuto,
     /// Open the realmlist editor, from the button or the address readout under it.
     Realmlist,
 }
@@ -55,6 +57,9 @@ pub(super) struct PasswordText;
 /// The checkbox's checked overlay, shown while the form's save flag is set.
 #[derive(Component)]
 pub(super) struct CheckMark;
+/// The "Log in automatically" checkbox's checked overlay.
+#[derive(Component)]
+pub(super) struct AutoCheckMark;
 /// The checkbox's hover highlight, driven by [`refresh_checkbox`].
 #[derive(Component)]
 pub(super) struct CheckHilight;
@@ -440,95 +445,123 @@ fn spawn_screen(
 
         // The Remember Account Name checkbox (20×20 at (17, top 653), resolved from its anchor
         // under the absent Community button) and its label at LEFT+24.
-        ui.spawn((Node {
-            position_type: PositionType::Absolute,
-            left: px(17.0),
-            top: px(653.0),
-            height: px(20.0),
-            align_items: AlignItems::Center,
-            flex_direction: FlexDirection::Row,
-            ..default()
-        },))
-            .with_children(|row| {
-                let mut b = row.spawn((
-                    LoginAction::ToggleSave,
-                    Button,
-                    Node {
-                        width: px(20.0),
-                        height: px(20.0),
-                        ..default()
-                    },
-                ));
-                match &art.checkbox {
-                    Some(check) => {
-                        b.insert((
-                            ImageNode::new(check.up.clone()),
-                            ArtSwap {
-                                up: check.up.clone(),
-                                down: check.down.clone(),
-                            },
-                        ));
-                        b.with_children(|inner| {
-                            inner.spawn((
-                                CheckMark,
-                                if form.save {
-                                    Visibility::Inherited
-                                } else {
-                                    Visibility::Hidden
+        // Deviation: a second row under it, "Log in automatically", built the same way.
+        let rows = [
+            (
+                LoginAction::ToggleSave,
+                653.0,
+                form.save,
+                strings
+                    .text("SAVE_ACCOUNT_NAME", "Remember Account Name")
+                    .to_string(),
+            ),
+            (
+                LoginAction::ToggleAuto,
+                677.0,
+                form.auto,
+                "Log in automatically".to_string(),
+            ),
+        ];
+        for (action, top, checked, label) in rows {
+            let auto = action == LoginAction::ToggleAuto;
+            ui.spawn((Node {
+                position_type: PositionType::Absolute,
+                left: px(17.0),
+                top: px(top),
+                height: px(20.0),
+                align_items: AlignItems::Center,
+                flex_direction: FlexDirection::Row,
+                ..default()
+            },))
+                .with_children(|row| {
+                    let mut b = row.spawn((
+                        action,
+                        Button,
+                        Node {
+                            width: px(20.0),
+                            height: px(20.0),
+                            ..default()
+                        },
+                    ));
+                    match &art.checkbox {
+                        Some(check) => {
+                            b.insert((
+                                ImageNode::new(check.up.clone()),
+                                ArtSwap {
+                                    up: check.up.clone(),
+                                    down: check.down.clone(),
                                 },
-                                ImageNode::new(check.checked.clone()),
-                                overlay(),
                             ));
-                            if let Some(hi) = &check.hi {
-                                inner.spawn((
-                                    CheckHilight,
-                                    Hilight,
-                                    Visibility::Hidden,
-                                    bevy::ui_render::ui_material::MaterialNode(hi.clone()),
+                            b.with_children(|inner| {
+                                let mut mark = inner.spawn((
+                                    if checked {
+                                        Visibility::Inherited
+                                    } else {
+                                        Visibility::Hidden
+                                    },
+                                    ImageNode::new(check.checked.clone()),
                                     overlay(),
                                 ));
-                            }
-                        });
-                    }
-                    None => {
-                        b.insert(BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.15)));
-                        b.with_children(|inner| {
-                            inner.spawn((
-                                CheckMark,
-                                if form.save {
-                                    Visibility::Inherited
+                                if auto {
+                                    mark.insert(AutoCheckMark);
                                 } else {
-                                    Visibility::Hidden
-                                },
-                                Text::new("x"),
-                                TextFont {
-                                    font: font.clone(),
-                                    font_size: 14.0 * s,
-                                    ..default()
-                                },
-                                TextColor(GOLD),
-                            ));
-                        });
+                                    mark.insert(CheckMark);
+                                }
+                                if let Some(hi) = &check.hi {
+                                    inner.spawn((
+                                        CheckHilight,
+                                        Hilight,
+                                        Visibility::Hidden,
+                                        bevy::ui_render::ui_material::MaterialNode(hi.clone()),
+                                        overlay(),
+                                    ));
+                                }
+                            });
+                        }
+                        None => {
+                            b.insert(BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.15)));
+                            b.with_children(|inner| {
+                                let mut mark = inner.spawn((
+                                    if checked {
+                                        Visibility::Inherited
+                                    } else {
+                                        Visibility::Hidden
+                                    },
+                                    Text::new("x"),
+                                    TextFont {
+                                        font: font.clone(),
+                                        font_size: 14.0 * s,
+                                        ..default()
+                                    },
+                                    TextColor(GOLD),
+                                ));
+                                if auto {
+                                    mark.insert(AutoCheckMark);
+                                } else {
+                                    mark.insert(CheckMark);
+                                }
+                            });
+                        }
                     }
-                }
-                row.spawn((
-                    Text::new(strings.text("SAVE_ACCOUNT_NAME", "Remember Account Name")),
-                    TextFont {
-                        font: font.clone(),
-                        font_size: 10.0 * s, // the authored FontHeight 10
-                        ..default()
-                    },
-                    TextColor(GOLD),
-                    TextShadow {
-                        offset: Vec2::new(s, s),
-                        color: Color::BLACK,
-                    },
-                    Node {
-                        margin: UiRect::left(px(4.0)), // LEFT+24 from the checkbox's left edge
-                        ..default()
-                    },
-                ));
-            });
+                    row.spawn((
+                        Text::new(label),
+                        TextFont {
+                            font: font.clone(),
+                            font_size: 10.0 * s, // the authored FontHeight 10
+                            ..default()
+                        },
+                        TextColor(GOLD),
+                        TextShadow {
+                            offset: Vec2::new(s, s),
+                            color: Color::BLACK,
+                        },
+                        Node {
+                            margin: UiRect::left(px(4.0)), // LEFT+24 from the checkbox's left edge
+                            ..default()
+                        },
+                    ));
+                });
+        }
     });
 }
 
@@ -575,8 +608,26 @@ pub(super) fn refresh_checkbox(
     form: Res<LoginForm>,
     boxes: Query<(&Interaction, &Children), With<ArtSwap>>,
     mut marks: Query<&mut Visibility, (With<CheckMark>, Without<CheckHilight>)>,
-    mut hilights: Query<&mut Visibility, With<CheckHilight>>,
+    mut auto_marks: Query<
+        &mut Visibility,
+        (
+            With<AutoCheckMark>,
+            Without<CheckMark>,
+            Without<CheckHilight>,
+        ),
+    >,
+    mut hilights: Query<&mut Visibility, (With<CheckHilight>, Without<AutoCheckMark>)>,
 ) {
+    for mut vis in &mut auto_marks {
+        let want = if form.auto {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *vis != want {
+            *vis = want;
+        }
+    }
     for mut vis in &mut marks {
         let want = if form.save {
             Visibility::Inherited
