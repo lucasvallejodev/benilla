@@ -1803,3 +1803,176 @@ mod tests {
         assert!(rx.try_iter().next().is_none());
     }
 }
+
+/// Armed by [`aim_target_interact`] for [`press_target_interact`] in the same frame.
+#[derive(Resource, Default)]
+pub(crate) struct TargetInteractArmed(bool);
+
+/// Deviation, [`benilla_world::interact::TargetInteract`] (a gamepad's Interact): stands the
+/// hover on the current target for this frame, so the cursor classifier grades it as a cursor
+/// over it would be. Runs after the picks and before [`cursor_mode::classify_cursor`].
+///
+/// With no target it takes a soft target ([`soft_target`]): a corpse to loot or skin (the death
+/// edge clears the selection, `ring::update_ring`), else an NPC or a usable object in front.
+pub(super) fn aim_target_interact(
+    mut asks: MessageReader<benilla_world::interact::TargetInteract>,
+    selection: Res<Selection>,
+    units: Query<(
+        Entity,
+        &Guid,
+        &Transform,
+        &ObjectStore,
+        &crate::net::NetEntity,
+    )>,
+    self_q: Query<&Transform, With<SelfPlayer>>,
+    camera: Query<&GlobalTransform, With<benilla_world::view::WorldCamera>>,
+    mut hovered: ResMut<Hovered>,
+    mut object: ResMut<HoveredObject>,
+    mut armed: ResMut<TargetInteractArmed>,
+    loot_all: Option<ResMut<crate::ui_loot::PadLootAll>>,
+) {
+    let Some(ask) = asks.read().last().copied() else {
+        return;
+    };
+    let pick = match (selection.target, selection.guid) {
+        (Some(target), Some(guid)) => Some(SoftTarget::Unit(target, guid)),
+        _ => self_q.single().ok().and_then(|me| {
+            let ahead = camera
+                .single()
+                .ok()
+                .map(|c| c.forward().as_vec3().with_y(0.0).normalize_or_zero())
+                .unwrap_or(Vec3::ZERO);
+            soft_target(&units, me.translation, ahead, selection.last)
+        }),
+    };
+    *hovered = Hovered::default();
+    *object = HoveredObject::default();
+    match pick {
+        Some(SoftTarget::Unit(target, guid)) => {
+            *hovered = Hovered {
+                target: Some(target),
+                guid: Some(guid),
+                distance: 0.0,
+                ..Hovered::default()
+            };
+        }
+        Some(SoftTarget::Object(target, guid)) => {
+            *object = HoveredObject {
+                target: Some(target),
+                guid: Some(guid),
+                distance: 0.0,
+            };
+        }
+        None => return,
+    }
+    if let (true, Some(mut loot_all)) = (ask.loot_all, loot_all) {
+        loot_all.0 = Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
+    }
+    armed.0 = true;
+}
+
+/// What a soft-target Interact acts on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SoftTarget {
+    Unit(Entity, u64),
+    Object(Entity, u64),
+}
+
+/// How far a soft target may be, in yards: corpses, then NPCs and objects (whose use still needs
+/// the classifier's reach).
+const SOFT_CORPSE_RANGE: f32 = 10.0;
+const SOFT_RANGE: f32 = 6.0;
+
+/// The GameObject types a soft Interact uses: quest giver, chest (herbs and veins too), goober,
+/// text, mailbox.
+const SOFT_GO_TYPES: [i32; 5] = [2, 3, 10, 9, 19];
+/// `GAMEOBJECT_FLAGS` bit `0x10`: no interact.
+const GO_FLAG_NO_INTERACT: u32 = 0x10;
+
+/// The soft target near `me`: a dead unit to loot or skin (`last`, the last target, first), else
+/// the nearest NPC with a service or usable GameObject, favouring what lies ahead of the camera
+/// (`ahead`, flat) and skipping what lies behind it.
+fn soft_target(
+    units: &Query<(
+        Entity,
+        &Guid,
+        &Transform,
+        &ObjectStore,
+        &crate::net::NetEntity,
+    )>,
+    me: Vec3,
+    ahead: Vec3,
+    last: Option<u64>,
+) -> Option<SoftTarget> {
+    let mut corpse: Option<(f32, SoftTarget)> = None;
+    let mut other: Option<(f32, SoftTarget)> = None;
+    for (entity, guid, tf, store, net) in units {
+        let s = &store.0;
+        let offset = (tf.translation - me).with_y(0.0);
+        let d = offset.length();
+        let facing = if ahead == Vec3::ZERO || d < 0.5 {
+            1.0
+        } else {
+            offset.normalize().dot(ahead)
+        };
+        match net.kind {
+            benilla_protocol::EntityKind::Unit | benilla_protocol::EntityKind::Player => {
+                let dead_usable = s.unit_is_dead()
+                    && (s.unit_lootable()
+                        || s.unit_flags() & cursor_mode::UNIT_FLAG_SKINNABLE != 0);
+                if dead_usable && d <= SOFT_CORPSE_RANGE {
+                    let rank = if last == Some(guid.0) { -1.0 } else { d };
+                    if corpse.is_none_or(|(r, _)| rank < r) {
+                        corpse = Some((rank, SoftTarget::Unit(entity, guid.0)));
+                    }
+                } else if !s.unit_is_dead()
+                    && s.unit_npc_flags() != 0
+                    && d <= SOFT_RANGE
+                    && facing > 0.0
+                {
+                    let rank = d * (2.0 - facing);
+                    if other.is_none_or(|(r, _)| rank < r) {
+                        other = Some((rank, SoftTarget::Unit(entity, guid.0)));
+                    }
+                }
+            }
+            benilla_protocol::EntityKind::GameObject => {
+                let usable = SOFT_GO_TYPES.contains(&s.gameobject_type_id())
+                    && s.gameobject_flags() & GO_FLAG_NO_INTERACT == 0;
+                if usable && d <= SOFT_RANGE && facing > 0.0 {
+                    let rank = d * (2.0 - facing);
+                    if other.is_none_or(|(r, _)| rank < r) {
+                        other = Some((rank, SoftTarget::Object(entity, guid.0)));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    corpse.or(other).map(|(_, t)| t)
+}
+
+/// The other half of [`aim_target_interact`]: latch the graded pick as a press and send the
+/// right-click the context ladder ([`act_on_right_click`]) acts on.
+pub(super) fn press_target_interact(
+    mut armed: ResMut<TargetInteractArmed>,
+    hovered: Res<Hovered>,
+    object: Res<HoveredObject>,
+    occlusion: Res<PickOcclusion>,
+    cursor: Res<WorldCursor>,
+    fork: Res<cursor_mode::AttackFork>,
+    mut press: ResMut<PressPick>,
+    mut right_clicks: MessageWriter<WorldRightClick>,
+) {
+    if !std::mem::take(&mut armed.0) {
+        return;
+    }
+    *press = PressPick {
+        hovered: *hovered,
+        object: *object,
+        occlusion: *occlusion,
+        cursor: *cursor,
+        attack_fork: *fork,
+    };
+    right_clicks.write(WorldRightClick);
+}

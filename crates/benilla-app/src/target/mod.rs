@@ -280,6 +280,7 @@ impl Plugin for TargetPlugin {
             .init_resource::<WorldCursor>()
             .init_resource::<cursor_mode::AttackFork>()
             .init_resource::<CombatFlash>()
+            .init_resource::<click::TargetInteractArmed>()
             .init_resource::<scan::TabHistory>()
             .init_resource::<scan::LastEnemy>()
             .add_message::<AttackNearestRequest>()
@@ -304,7 +305,13 @@ impl Plugin for TargetPlugin {
                     (latch_press_pick, hover::update_pick_occlusion).chain(),
                     hover::update_hover,
                     hover::update_hovered_object,
-                    cursor_mode::classify_cursor,
+                    // A gamepad's Interact stands the hover on the target, then presses it.
+                    (
+                        click::aim_target_interact,
+                        cursor_mode::classify_cursor,
+                        click::press_target_interact,
+                    )
+                        .chain(),
                     // The right press's two legs of the reference's OnMouseDown hook (`0x492c20`),
                     // the targeting cancel and the repair-mode reset, before the cursor drive, so
                     // the press frame already reads both modes cleared.

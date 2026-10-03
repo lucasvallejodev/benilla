@@ -1,0 +1,568 @@
+//! Gamepad play on top of benilla. 1.12.1 has no gamepad, so nothing here is reference behaviour.
+//!
+//! The split ("brain in Rust, face in Lua"):
+//! - this crate reads the pad, picks the layer the triggers hold (bare / LT / RT / LT+RT), moves
+//!   the body with the left stick and the camera with the right, and routes every button press;
+//! - the BenillaPad addon ([`addon`], installed into `benilla-config/AddOns`) draws the gamepad
+//!   bar and answers what a press does: `BenillaPad_Resolve(button, layer)` returns a binding
+//!   command, which runs through the UI VM's `execute_binding`, the path a key takes, so the
+//!   hardware-event gate and the press/release bodies behave as the keyboard's do. A command with
+//!   a leading `@` is native (`@INTERACT`, the right-click context action on the target).
+//!
+//! The addon hears `BENILLAPAD_CONNECTED(style)`, `BENILLAPAD_DISCONNECTED`,
+//! `BENILLAPAD_LAYER(layer)`, `BENILLAPAD_BUTTON(button, down)`, and outside the world mode
+//! `BENILLAPAD_NAV(button, down)` and `BENILLAPAD_STICK(lx, ly, rx, ry)`. Without the addon the
+//! pad still plays on the stock commands ([`map::fallback_command`]).
+
+pub mod addon;
+pub mod map;
+
+use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
+use bevy::input::InputSystems;
+use bevy::prelude::*;
+use bevy::window::PrimaryWindow;
+
+use benilla_ui::script::{ScriptValue, UiScript};
+use benilla_world::interact::TargetInteract;
+
+/// The gamepad plugin: re-enables bevy's gilrs backend, which benilla's boot disables, keeps the
+/// addon installed, and runs [`drive_pad`] after bevy's input update so the commands land in this
+/// frame's binding pass.
+pub struct PadPlugin;
+
+impl Plugin for PadPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins(bevy::gilrs::GilrsPlugin)
+            .insert_resource(PadSettings::from_env())
+            .init_resource::<PadState>()
+            .add_systems(Startup, addon::install_addon)
+            .add_systems(PreUpdate, drive_pad.after(InputSystems));
+    }
+}
+
+/// Tuning. The addon's settings apply once it loads; an environment variable wins over both.
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct PadSettings {
+    /// Stick deflection below which a stick is at rest (`PAD_DEADZONE`, 0..1).
+    pub deadzone: f32,
+    /// Camera turn at full deflection, radians per second (`PAD_LOOK_SPEED`).
+    pub look_speed: f32,
+    /// Stick up looks down (`PAD_INVERT_Y=1`).
+    pub invert_y: bool,
+    /// LB or RB held turns the right stick's up/down into zoom.
+    pub shoulder_zoom: bool,
+    /// The pad cursor's speed at full tilt, logical pixels a second.
+    pub cursor_speed: f32,
+    /// Interact's loot window takes everything at once.
+    pub loot_all: bool,
+    /// Which of the three an environment variable pinned.
+    pinned: [bool; 3],
+}
+
+impl Default for PadSettings {
+    fn default() -> Self {
+        Self {
+            deadzone: 0.25,
+            look_speed: 3.0,
+            invert_y: false,
+            shoulder_zoom: true,
+            cursor_speed: 1100.0,
+            loot_all: true,
+            pinned: [false; 3],
+        }
+    }
+}
+
+impl PadSettings {
+    fn from_env() -> Self {
+        let mut s = Self::default();
+        let num = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f32>().ok());
+        if let Some(v) = num("PAD_DEADZONE") {
+            s.deadzone = v.clamp(0.0, 0.95);
+            s.pinned[0] = true;
+        }
+        if let Some(v) = num("PAD_LOOK_SPEED") {
+            s.look_speed = v.max(0.0);
+            s.pinned[1] = true;
+        }
+        if let Ok(v) = std::env::var("PAD_INVERT_Y") {
+            s.invert_y = v == "1";
+            s.pinned[2] = true;
+        }
+        s
+    }
+
+    /// The addon's values, less what the environment pinned.
+    fn apply_addon(
+        &mut self,
+        deadzone: f32,
+        look_speed: f32,
+        invert_y: bool,
+        zoom: bool,
+        cursor_speed: f32,
+        loot_all: bool,
+    ) {
+        self.loot_all = loot_all;
+        self.shoulder_zoom = zoom;
+        self.cursor_speed = cursor_speed.max(50.0);
+        if !self.pinned[0] {
+            self.deadzone = deadzone.clamp(0.0, 0.95);
+        }
+        if !self.pinned[1] {
+            self.look_speed = look_speed.max(0.0);
+        }
+        if !self.pinned[2] {
+            self.invert_y = invert_y;
+        }
+    }
+}
+
+/// benilla's mouse-look rate at default sensitivity, radians per mouse unit
+/// (`player::camera::LOOK_SENSITIVITY`), to turn a stick's rad/s into motion units.
+const LOOK_RAD_PER_UNIT: f32 = 0.003;
+
+/// Camera zoom at full deflection while LB or RB is held, yards per second.
+const ZOOM_SPEED: f32 = 20.0;
+
+/// What a held button's press ran, so its release ends exactly that.
+#[derive(Clone, Debug)]
+enum Latched {
+    /// A binding command, released with its up half.
+    Command(String),
+    /// A native command or nothing: no release.
+    Done,
+    /// A modal press, released as `BENILLAPAD_NAV(button, false)`.
+    Nav,
+    /// The pad cursor's click, released with the mouse button.
+    Mouse(MouseButton),
+}
+
+/// The UI's height in units: FrameXML lays out a 768-high screen, so an absolute position (UI
+/// units times the effective scale) is `window height / 768` logical pixels a unit.
+const UI_HEIGHT: f32 = 768.0;
+
+/// What is held on our side, so each command gets exactly one down and one up.
+#[derive(Resource, Default)]
+struct PadState {
+    buttons: Vec<(GamepadButton, &'static str, Latched)>,
+    /// Which of [`map::MOVES`] is pressed.
+    moves: [bool; 4],
+    /// We hold mouse-look.
+    looking: bool,
+    /// The VM session the latches belong to; a new VM drops them, as benilla drops its own.
+    session: Option<u64>,
+    /// The pad this session's addon was told about.
+    announced: Option<Entity>,
+    layer: &'static str,
+    settings_gen: Option<u32>,
+    /// A resolver error, logged once per session.
+    resolve_failed: bool,
+    /// Last frame was in the cursor mode.
+    cursor: bool,
+}
+
+fn fire(script: &mut UiScript, event: &str, args: Vec<ScriptValue>) {
+    script.fire_event(event, args);
+}
+
+fn press(script: &UiScript, command: &str) {
+    match script.execute_binding(command, true) {
+        Ok(true) => {}
+        Ok(false) => warn!("pad: no binding command {command}"),
+        Err(e) => warn!("pad: {command} down failed: {e}"),
+    }
+}
+
+fn release(script: &UiScript, command: &str) {
+    // `Ok(false)` is a command that is not `runOnUp`: nothing to run.
+    if let Err(e) = script.execute_binding(command, false) {
+        warn!("pad: {command} up failed: {e}");
+    }
+}
+
+fn set_look(script: &UiScript, state: &mut PadState, on: bool) {
+    if state.looking == on {
+        return;
+    }
+    let lua = if on {
+        "MouselookStart()"
+    } else {
+        "MouselookStop()"
+    };
+    if let Err(e) = script.run(lua) {
+        warn!("pad: {lua} failed: {e}");
+    }
+    state.looking = on;
+}
+
+/// The command a press runs: the addon's answer, or the stock fallback without the addon.
+fn resolve(
+    script: &UiScript,
+    state: &mut PadState,
+    addon: bool,
+    button: &str,
+    layer: &str,
+) -> Option<String> {
+    if !addon {
+        return map::fallback_command(button, layer).map(str::to_string);
+    }
+    let chunk = format!(
+        "return BenillaPad_Resolve({}, {})",
+        map::lua_str(button),
+        map::lua_str(layer)
+    );
+    match script.eval::<Option<String>>(&chunk) {
+        Ok(command) => command,
+        Err(e) => {
+            if !std::mem::replace(&mut state.resolve_failed, true) {
+                warn!("pad: BenillaPad_Resolve failed: {e}");
+            }
+            None
+        }
+    }
+}
+
+/// The whole gamepad, once a frame. A focused EditBox blocks presses, never releases.
+fn drive_pad(
+    script: Option<NonSendMut<UiScript>>,
+    pads: Query<(Entity, &Gamepad)>,
+    mut settings: ResMut<PadSettings>,
+    time: Res<Time>,
+    mut motion: ResMut<AccumulatedMouseMotion>,
+    mut state: ResMut<PadState>,
+    mut interact: MessageWriter<TargetInteract>,
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    mut mouse: ResMut<ButtonInput<MouseButton>>,
+    mut scroll: ResMut<AccumulatedMouseScroll>,
+) {
+    // No in-world VM (glue screens, loading): nothing to drive and nothing of ours survives.
+    let Some(mut script) = script else {
+        *state = PadState::default();
+        return;
+    };
+    let session = script.session();
+    if state.session != Some(session) {
+        *state = PadState {
+            session: Some(session),
+            layer: "bare",
+            ..default()
+        };
+    }
+    // The first connected pad; none releases everything we hold.
+    let pad = pads.iter().next();
+
+    // ── Connection ──
+    match pad {
+        Some((entity, gamepad)) if state.announced != Some(entity) => {
+            let style = map::style(gamepad.vendor_id());
+            fire(
+                &mut script,
+                "BENILLAPAD_CONNECTED",
+                vec![ScriptValue::Str(style.to_string())],
+            );
+            info!("pad: controller connected ({style})");
+            state.announced = Some(entity);
+        }
+        None if state.announced.is_some() => {
+            fire(&mut script, "BENILLAPAD_DISCONNECTED", Vec::new());
+            info!("pad: controller disconnected");
+            state.announced = None;
+        }
+        _ => {}
+    }
+    let pad = pad.map(|(_, g)| g);
+
+    // ── The addon: its mode and settings ──
+    let (mode, gen) = script
+        .eval::<(Option<String>, Option<u32>)>(
+            "if BenillaPad_Mode then return BenillaPad_Mode() end",
+        )
+        .unwrap_or((None, None));
+    let addon = mode.is_some();
+    let mode = mode.unwrap_or_else(|| "world".to_string());
+    let cursor = mode == "cursor";
+    // The addon's own windows (menu, wheel, keybinds) take every button; the cursor mode plays on.
+    let world = mode == "world" || cursor;
+    if gen.is_some() && gen != state.settings_gen {
+        if let Ok((deadzone, look, invert, zoom, speed, loot_all)) =
+            script.eval::<(f32, f32, bool, Option<bool>, Option<f32>, Option<bool>)>(
+                "return BenillaPad_Settings()",
+            )
+        {
+            settings.apply_addon(
+                deadzone,
+                look,
+                invert,
+                zoom.unwrap_or(true),
+                speed.unwrap_or(1100.0),
+                loot_all.unwrap_or(true),
+            );
+        }
+        state.settings_gen = gen;
+    }
+    let mut window = windows.single_mut().ok();
+    // Entering the cursor mode: onto an open popup's first button, if there is one.
+    if cursor && !state.cursor {
+        if let Some(w) = window.as_deref_mut() {
+            snap(&script, w, "enter");
+        }
+    }
+    state.cursor = cursor;
+    let typing = script.has_keyboard_focus();
+
+    // ── Layer ──
+    let layer = pad.map_or("bare", |p| {
+        map::layer(
+            p.pressed(GamepadButton::LeftTrigger2),
+            p.pressed(GamepadButton::RightTrigger2),
+        )
+    });
+    if layer != state.layer {
+        state.layer = layer;
+        fire(
+            &mut script,
+            "BENILLAPAD_LAYER",
+            vec![ScriptValue::Str(layer.to_string())],
+        );
+    }
+
+    // ── Buttons ── releases first, each to what its press ran.
+    let mut i = 0;
+    while i < state.buttons.len() {
+        let (button, name, _) = state.buttons[i];
+        if pad.is_none_or(|p| !p.pressed(button)) {
+            let (_, _, latched) = state.buttons.swap_remove(i);
+            match latched {
+                Latched::Command(command) => release(&script, &command),
+                Latched::Nav => fire(
+                    &mut script,
+                    "BENILLAPAD_NAV",
+                    vec![ScriptValue::Str(name.to_string()), ScriptValue::Bool(false)],
+                ),
+                Latched::Mouse(b) => mouse.release(b),
+                Latched::Done => {}
+            }
+        } else {
+            i += 1;
+        }
+    }
+    if let Some(pad) = pad {
+        for (button, name) in map::BUTTONS {
+            if pad.just_released(button) {
+                fire(
+                    &mut script,
+                    "BENILLAPAD_BUTTON",
+                    vec![ScriptValue::Str(name.to_string()), ScriptValue::Bool(false)],
+                );
+            }
+            if !pad.just_pressed(button) {
+                continue;
+            }
+            fire(
+                &mut script,
+                "BENILLAPAD_BUTTON",
+                vec![ScriptValue::Str(name.to_string()), ScriptValue::Bool(true)],
+            );
+            if !world {
+                fire(
+                    &mut script,
+                    "BENILLAPAD_NAV",
+                    vec![ScriptValue::Str(name.to_string()), ScriptValue::Bool(true)],
+                );
+                state.buttons.push((button, name, Latched::Nav));
+                continue;
+            }
+            if cursor {
+                if let Some(latched) = cursor_press(
+                    &script,
+                    name,
+                    window.as_deref_mut(),
+                    &mut mouse,
+                    &mut scroll,
+                ) {
+                    state.buttons.push((button, name, latched));
+                    continue;
+                }
+            }
+            if typing {
+                continue;
+            }
+            let latched = match resolve(&script, &mut state, addon, name, layer) {
+                Some(command) if command == "@INTERACT" => {
+                    interact.write(TargetInteract {
+                        loot_all: settings.loot_all,
+                    });
+                    Latched::Done
+                }
+                Some(command) if command.starts_with('@') => {
+                    warn!("pad: unknown native command {command}");
+                    Latched::Done
+                }
+                Some(command) => {
+                    press(&script, &command);
+                    Latched::Command(command)
+                }
+                None => Latched::Done,
+            };
+            state.buttons.push((button, name, latched));
+        }
+    }
+
+    let left = pad.map_or(Vec2::ZERO, Gamepad::left_stick);
+    let right = pad.map_or(Vec2::ZERO, Gamepad::right_stick);
+
+    // ── Outside the world mode the sticks belong to the addon's window ──
+    if !world {
+        release_moves(&script, &mut state);
+        set_look(&script, &mut state, false);
+        fire(
+            &mut script,
+            "BENILLAPAD_STICK",
+            vec![
+                ScriptValue::Number(left.x as f64),
+                ScriptValue::Number(left.y as f64),
+                ScriptValue::Number(right.x as f64),
+                ScriptValue::Number(right.y as f64),
+            ],
+        );
+        return;
+    }
+
+    // ── Left stick ──
+    let want = map::move_commands(left, settings.deadzone);
+    for (k, command) in map::MOVES.iter().enumerate() {
+        if state.moves[k] && !want[k] {
+            release(&script, command);
+            state.moves[k] = false;
+        } else if !state.moves[k] && want[k] && !typing {
+            press(&script, command);
+            state.moves[k] = true;
+        }
+    }
+
+    // ── Right stick ── in the cursor mode, the mouse cursor.
+    let right_live = right.length() >= settings.deadzone;
+    if cursor {
+        set_look(&script, &mut state, false);
+        if let (Some(w), true) = (window.as_deref_mut(), right_live) {
+            let speed =
+                settings.cursor_speed * deflection(right.length(), settings.deadzone).powf(1.5);
+            let at = w
+                .cursor_position()
+                .unwrap_or(Vec2::new(w.width() / 2.0, w.height() / 2.0));
+            // Window y runs down; stick y runs up.
+            let to = at + Vec2::new(right.x, -right.y).normalize() * speed * time.delta_secs();
+            let to = to.clamp(Vec2::ZERO, Vec2::new(w.width() - 1.0, w.height() - 1.0));
+            w.set_cursor_position(Some(to));
+        }
+        return;
+    }
+
+    // ── Right stick ── with LB or RB held, up/down zooms; otherwise mouse-look, held while
+    // either stick is out of rest so the body faces the camera.
+    let left_live = left.length() >= settings.deadzone;
+    let shoulder = pad.is_some_and(|p| {
+        p.pressed(GamepadButton::LeftTrigger) || p.pressed(GamepadButton::RightTrigger)
+    });
+    let zooming = settings.shoulder_zoom && shoulder && right_live && right.y.abs() > right.x.abs();
+    if zooming && !typing {
+        let yards = ZOOM_SPEED * time.delta_secs() * deflection(right.length(), settings.deadzone);
+        let verb = if right.y > 0.0 {
+            "CameraZoomIn"
+        } else {
+            "CameraZoomOut"
+        };
+        if let Err(e) = script.run(&format!("{verb}({yards})")) {
+            warn!("pad: {verb} failed: {e}");
+        }
+    }
+    set_look(
+        &script,
+        &mut state,
+        (right_live || left_live) && !typing && !zooming,
+    );
+    if state.looking && right_live && !zooming {
+        let mag = deflection(right.length(), settings.deadzone);
+        let dir = right.normalize();
+        let units = settings.look_speed * time.delta_secs() / LOOK_RAD_PER_UNIT * mag;
+        // Mouse +y is down, which pitches the view down; stick +y is up.
+        let y = if settings.invert_y { dir.y } else { -dir.y };
+        motion.delta += Vec2::new(dir.x, y) * units;
+    }
+}
+
+/// A press in the cursor mode: A and X click (left, right), B runs the Escape ladder, the D-pad
+/// snaps to the nearest button, LB / RB scroll. `None` for a button the cursor leaves alone
+/// (Start, Select), which then resolves as in the world.
+fn cursor_press(
+    script: &UiScript,
+    name: &str,
+    window: Option<&mut Window>,
+    mouse: &mut ButtonInput<MouseButton>,
+    scroll: &mut AccumulatedMouseScroll,
+) -> Option<Latched> {
+    match name {
+        "A" => {
+            mouse.press(MouseButton::Left);
+            Some(Latched::Mouse(MouseButton::Left))
+        }
+        "X" => {
+            mouse.press(MouseButton::Right);
+            Some(Latched::Mouse(MouseButton::Right))
+        }
+        "B" => {
+            press(script, "TOGGLEGAMEMENU");
+            Some(Latched::Command("TOGGLEGAMEMENU".to_string()))
+        }
+        "DUP" | "DDOWN" | "DLEFT" | "DRIGHT" => {
+            if let Some(w) = window {
+                snap(script, w, name);
+            }
+            Some(Latched::Done)
+        }
+        "LB" | "RB" => {
+            scroll.unit = MouseScrollUnit::Line;
+            scroll.delta.y += if name == "LB" { 1.0 } else { -1.0 };
+            Some(Latched::Done)
+        }
+        "Y" | "L3" | "R3" => Some(Latched::Done),
+        _ => None,
+    }
+}
+
+/// Move the cursor to the button `BenillaPad_Snap(dir, x, y)` names, if it names one.
+fn snap(script: &UiScript, window: &mut Window, dir: &str) {
+    let h = window.height();
+    let px_per_unit = h / UI_HEIGHT;
+    let at = window
+        .cursor_position()
+        .unwrap_or(Vec2::new(window.width() / 2.0, h / 2.0));
+    let (ax, ay) = (at.x / px_per_unit, (h - at.y) / px_per_unit);
+    let chunk = format!(
+        "if BenillaPad_Snap then return BenillaPad_Snap({}, {ax}, {ay}) end",
+        map::lua_str(dir)
+    );
+    match script.eval::<(Option<f32>, Option<f32>)>(&chunk) {
+        Ok((Some(x), Some(y))) => {
+            window.set_cursor_position(Some(Vec2::new(x * px_per_unit, h - y * px_per_unit)));
+        }
+        Ok(_) => {}
+        Err(e) => warn!("pad: BenillaPad_Snap failed: {e}"),
+    }
+}
+
+/// A stick's length rescaled past the deadzone, so motion starts from zero at its edge.
+fn deflection(length: f32, deadzone: f32) -> f32 {
+    ((length - deadzone) / (1.0 - deadzone).max(f32::EPSILON)).clamp(0.0, 1.0)
+}
+
+fn release_moves(script: &UiScript, state: &mut PadState) {
+    for (k, command) in map::MOVES.iter().enumerate() {
+        if std::mem::take(&mut state.moves[k]) {
+            release(script, command);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

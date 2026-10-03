@@ -384,6 +384,7 @@ impl Plugin for UiLootPlugin {
         app.add_observer(on_cvar);
         app.init_resource::<LootState>()
             .init_resource::<LootConfig>()
+            .init_resource::<PadLootAll>()
             .init_resource::<LootLatch>()
             .init_resource::<LootKneel>()
             .init_resource::<LootMoveStart>()
@@ -657,6 +658,11 @@ impl LootSourceObjects<'_, '_> {
     }
 }
 
+/// Deviation: a gamepad Interact's loot-all ([`benilla_world::interact::TargetInteract`]),
+/// armed until the next loot window opens or the deadline passes, then spent.
+#[derive(Resource, Default)]
+pub(crate) struct PadLootAll(pub(crate) Option<std::time::Instant>);
+
 fn feed_loot(
     script: Option<NonSendMut<UiScript>>,
     mut loot: ResMut<LootState>,
@@ -674,6 +680,7 @@ fn feed_loot(
     group: Res<GroupState>,
     names: Res<NameCache>,
     objects: LootSourceObjects,
+    pad_loot_all: Option<ResMut<PadLootAll>>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -717,7 +724,10 @@ fn feed_loot(
             // Auto-loot (`LootConfig`), inverted by a held Shift: every row gets a hand pick's
             // sends, and emptying the window auto-releases it.
             let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-            if cfg.auto_loot != shift {
+            let pad = pad_loot_all
+                .and_then(|mut p| p.0.take())
+                .is_some_and(|until| std::time::Instant::now() < until);
+            if cfg.auto_loot != shift || pad {
                 let mut bind_confirm_fired = false;
                 for index in 1..=snap.rows.len() as u32 {
                     match loot.action_at(index) {

@@ -60,6 +60,16 @@ pub struct WorldRightClick;
 #[derive(Message, Clone, Copy)]
 pub struct WorldRightPress;
 
+/// Deviation, for a crate on top (a gamepad): the right-click context action taken on the current
+/// target with no cursor, as if the cursor stood on it; with no target, on the nearest corpse,
+/// NPC or usable object in front of the camera. 1.12 has no such verb; a right-click is the only
+/// way to interact.
+#[derive(Message, Clone, Copy)]
+pub struct TargetInteract {
+    /// A loot window this opens takes every row at once, as a Shift-click auto-loot does.
+    pub loot_all: bool,
+}
+
 /// The world's pick sources as one `SystemParam`: the entity pick geometry ([`PickParts`]) and
 /// every lane that draws without entities ([`PickSource`]). Use this, not [`PickParts`] alone,
 /// which still returns hits but misses most of the static world.
@@ -115,13 +125,14 @@ impl WorldPick<'_, '_> {
     }
 }
 
-/// Registers the three world click messages.
+/// Registers the world click messages.
 pub struct InteractPlugin;
 
 impl Plugin for InteractPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<WorldClick>()
             .add_message::<WorldRightClick>()
-            .add_message::<WorldRightPress>();
+            .add_message::<WorldRightPress>()
+            .add_message::<TargetInteract>();
     }
 }
